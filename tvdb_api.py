@@ -25,6 +25,12 @@ import tempfile
 import warnings
 import logging
 import datetime
+import socket
+
+try:
+    import httplib2
+except ImportError:
+    have_httplib2 = False
 
 try:
     import xml.etree.cElementTree as ElementTree
@@ -129,7 +135,7 @@ class Show(dict):
         To search Scrubs for all episodes with "mentor" in the episode name:
 
         >>> t['scrubs'].search('mentor', key = 'episodename')
-        [<Episode 01x02 - My Mentor>, <Episode 03x15 - My Tormented Mentor>]
+        [<Episode 00x38 - Will You Ever Be My Mentor>, <Episode 01x02 - My Mentor>, <Episode 03x15 - My Tormented Mentor>]
         >>>
 
         # Using search results
@@ -278,6 +284,7 @@ class Tvdb:
                 select_first = False,
                 debug = False,
                 cache = True,
+                cache_dir = None,
                 banners = False,
                 actors = False,
                 custom_ui = None,
@@ -301,13 +308,24 @@ class Tvdb:
                  >>> import logging
                  >>> logging.basicConfig(level = logging.DEBUG)
 
-        cache (True/False/str/unicode/urllib2 opener):
-            Retrieved XML are persisted to to disc. If true, stores in
-            tvdb_api folder under your systems TEMP_DIR, if set to
-            str/unicode instance it will use this as the cache
-            location. If False, disables caching.  Can also be passed
-            an arbitrary Python object, which is used as a urllib2
-            opener, which should be created by urllib2.build_opener
+        cache (True/False/'recache'):
+            Retrieved XML are persisted to to disc. If true, caches
+            files to the directory as specified by cache_dir. If
+            False, disables caching.
+
+            If set to the magic string 'recache', will update the
+            locally cached files
+
+            Deprecated: A string can specify the cache directory.
+
+            Deprecated: Can be passed an arbitrary Python object,
+            which is used as a urllib2 opener, which should be created
+            by urllib2.build_opener.
+
+        cache_dir (None for default, or str file path):
+            Specifies a path used to store the cached XML files in. If
+            None, will use the default path (a "tvdb_api" folder in
+            your TEMP_DIR)
 
         banners (True/False):
             Retrieves the banners for a show. These are accessed
@@ -381,22 +399,31 @@ class Tvdb:
 
 
         if cache is True:
+            # Enable caching
             self.config['cache_enabled'] = True
-            self.config['cache_location'] = self._getTempDir()
+
+            if cache_dir is None:
+                # Default cache dir
+                self.config['cache_location'] = self._getTempDir()
+
+            else:
+                # User specified
+                self.config['cache_location'] = cache_dir
+
             self.urlopener = urllib2.build_opener(
                 CacheHandler(self.config['cache_location'])
             )
 
         elif cache is False:
+            # Disable caching
             self.config['cache_enabled'] = False
             self.urlopener = urllib2.build_opener() # default opener with no caching
 
         elif isinstance(cache, basestring):
-            self.config['cache_enabled'] = True
-            self.config['cache_location'] = cache
-            self.urlopener = urllib2.build_opener(
-                CacheHandler(self.config['cache_location'])
-            )
+            # Backwards compatibility
+            warnings.warn("Cache directory should be specified using cache_dir argument", DeprecationWarning)
+            cache_dir = cache
+            cache = True
 
         elif isinstance(cache, urllib2.OpenerDirector):
             # If passed something from urllib2.build_opener, use that
@@ -406,6 +433,7 @@ class Tvdb:
 
         else:
             raise ValueError("Invalid value for Cache %r (type was %s)" % (cache, type(cache)))
+
 
         self.config['banners_enabled'] = banners
         self.config['actors_enabled'] = actors
@@ -469,6 +497,37 @@ class Tvdb:
         return os.path.join(tempfile.gettempdir(), "tvdb_api")
 
     def _loadUrl(self, url, recache = False):
+        global lastTimeout
+
+        if not have_httplib2:
+            warnings.warn("Could not import httplib2, falling back to legacy urllib2 opener!!", DeprecationWarning)
+            return self._loadUrl_legacy(url = url, recache = recache)
+
+        log().debug("Retrieving URL %s" % url)
+
+        if self.config['cache_enabled'] is not None:
+            h_cache = self.config['cache_location']
+        else:
+            h_cache = False
+
+        # Handle a recache request, this will get fresh content and
+        # cache again if enabled
+        h = httplib2.Http(cache = h_cache)
+        if str(self.config['cache_enabled']).lower() == 'recache' or recache:        
+            h_header = {'cache-control':'no-cache'}
+        else:
+            h_header = {}
+
+        try:
+            header, resp = h.request(url, headers = h_header)
+        except (socket.error, IOError, httplib2.HttpLib2Error), errormsg:
+             if not str(errormsg).startswith('HTTP Error'):
+                 lastTimeout = datetime.datetime.now()
+                 raise tvdb_error("Could not connect to server %s: %s" % (url, errormsg))
+
+        return str(resp)
+
+    def _loadUrl_legacy(self, url, recache = False):
         global lastTimeout
         try:
             log().debug("Retrieving URL %s" % url)
@@ -710,8 +769,6 @@ class Tvdb:
 
         if self.config['language'] is None:
             log().debug('Config language is none, using show language')
-            if language is None:
-                raise tvdb_error("config['language'] was None, this should not happen")
             getShowInLanguage = language
         else:
             log().debug(

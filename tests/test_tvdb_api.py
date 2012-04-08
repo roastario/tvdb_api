@@ -12,6 +12,7 @@ import os
 import sys
 import datetime
 import unittest
+import warnings
 
 # Force parent directory onto path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -438,7 +439,15 @@ class test_tvdb_custom_caching(unittest.TestCase):
 
         tvdb_api.Tvdb(cache = True)
         tvdb_api.Tvdb(cache = False)
-        tvdb_api.Tvdb(cache = "/tmp")
+
+    def test_deprecate_cache_with_str(self):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            tvdb_api.Tvdb(cache = "/tmp")
+
+        assert len(w) == 1
+        assert issubclass(w[-1].category, DeprecationWarning)
+        assert "cache_dir" in str(w[-1].message)
 
     def test_invalid_cache_option(self):
         """Tests setting cache to invalid value
@@ -470,18 +479,28 @@ class test_tvdb_custom_caching(unittest.TestCase):
         else:
             self.fail("Did not use custom opener")
 
-class test_tvdb_by_id(unittest.TestCase):
-    t = None
-    def setUp(self):
-        if self.t is None:
-            self.__class__.t = tvdb_api.Tvdb(cache = True, actors = True)
+    def test_httplib2_fallback(self):
+        """If httplib2 is unavailable, fallback to urllib
+        """
+        orig_have_httplib2 = tvdb_api.have_httplib2
+        tvdb_api.have_httplib2 = False
+        try:
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter(action = "always")
+                t = tvdb_api.Tvdb(cache = True)
+                print "after init"
+                print t['scrubs'][1][2]
+                print "done thing"
 
-    def test_actors_is_correct_datatype(self):
-        """Check show/_actors key exists and is correct type"""
-        self.assertEquals(
-            self.t[76156]['seriesname'],
-            'Scrubs'
-            )
+            print w
+            assert len(w) > 1
+            assert issubclass(w[-1].category, DeprecationWarning)
+            print w[-1].message
+            assert "Could not import httplib2, falling back to legacy urllib2 opener" in str(w[-1].message)
+
+        finally:
+            tvdb_api.have_httplib2 = orig_have_httplib2
+
 
 if __name__ == '__main__':
     runner = unittest.TextTestRunner(verbosity = 2)
